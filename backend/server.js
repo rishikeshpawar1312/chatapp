@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -25,10 +24,12 @@ mongoose.connect("mongodb+srv://spawar5501:DhcxHyAPBbujl98m@cluster0.it5ny.mongo
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// User Schema
+// Updated User Schema with role
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -41,6 +42,22 @@ const messageSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 const Message = mongoose.model('Message', messageSchema);
+
+// Track connected users
+const connectedUsers = new Map();
+
+// Admin middleware
+const isAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied. Admin privileges required.' });
+    }
+    next();
+  } catch (error) {
+    res.status(500).json({ error: 'Error checking admin status' });
+  }
+};
 
 // Middleware to verify JWT
 const authenticateToken = (req, res, next) => {
@@ -59,7 +76,7 @@ const authenticateToken = (req, res, next) => {
 // Auth Routes
 app.post('/api/register', async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password, role } = req.body;
     
     // Check if user already exists
     const existingUser = await User.findOne({ username });
@@ -70,22 +87,24 @@ app.post('/api/register', async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // Create new user
+    // Create new user (only allow role specification if first user)
+    const userCount = await User.countDocuments();
     const user = new User({
       username,
-      password: hashedPassword
+      password: hashedPassword,
+      role: userCount === 0 ? 'admin' : 'user' // First user is admin, rest are users
     });
     
     await user.save();
     
     // Create token
     const token = jwt.sign(
-      { id: user._id, username: user.username },
+      { id: user._id, username: user.username, role: user.role },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '24h' }
     );
     
-    res.status(201).json({ token, username: user.username });
+    res.status(201).json({ token, username: user.username, role: user.role });
   } catch (error) {
     res.status(500).json({ error: 'Error registering user' });
   }
@@ -100,6 +119,11 @@ app.post('/api/login', async (req, res) => {
     if (!user) {
       return res.status(400).json({ error: 'User not found' });
     }
+
+    // Check if user is active
+    if (!user.isActive) {
+      return res.status(403).json({ error: 'Account has been deactivated' });
+    }
     
     // Check password
     const validPassword = await bcrypt.compare(password, user.password);
@@ -109,14 +133,48 @@ app.post('/api/login', async (req, res) => {
     
     // Create token
     const token = jwt.sign(
-      { id: user._id, username: user.username },
+      { id: user._id, username: user.username, role: user.role },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '24h' }
     );
     
-    res.json({ token, username: user.username });
+    res.json({ token, username: user.username, role: user.role });
   } catch (error) {
     res.status(500).json({ error: 'Error logging in' });
+  }
+});
+
+// Admin Routes
+app.get('/api/users', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const users = await User.find().select('-password');
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching users' });
+  }
+});
+
+app.patch('/api/users/:userId', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const { role, isActive } = req.body;
+    const user = await User.findByIdAndUpdate(
+      req.params.userId,
+      { role, isActive },
+      { new: true }
+    ).select('-password');
+    
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ error: 'Error updating user' });
+  }
+});
+
+app.delete('/api/messages/:messageId', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    await Message.findByIdAndDelete(req.params.messageId);
+    res.json({ message: 'Message deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error deleting message' });
   }
 });
 
@@ -130,22 +188,50 @@ app.get('/api/messages', authenticateToken, async (req, res) => {
   }
 });
 
+// Function to broadcast updated user list
+const broadcastUserList = () => {
+  const users = Array.from(connectedUsers.values()).map(user => ({
+    id: user.id,
+    username: user.username,
+    role: user.role
+  }));
+  io.emit('users', users);
+};
+
 // Socket.IO authentication and connection handling
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) {
     return next(new Error('Authentication error'));
   }
 
-  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, decoded) => {
-    if (err) return next(new Error('Authentication error'));
-    socket.user = decoded;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const user = await User.findById(decoded.id);
+    
+    if (!user || !user.isActive) {
+      return next(new Error('Authentication error'));
+    }
+    
+    socket.user = {
+      id: user._id,
+      username: user.username,
+      role: user.role
+    };
     next();
-  });
+  } catch (err) {
+    next(new Error('Authentication error'));
+  }
 });
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.user.username);
+  
+  // Add user to connected users
+  connectedUsers.set(socket.id, socket.user);
+  
+  // Broadcast updated user list
+  broadcastUserList();
 
   socket.on('sendMessage', async (messageData) => {
     try {
@@ -155,14 +241,35 @@ io.on('connection', (socket) => {
       });
       await message.save();
       const populatedMessage = await Message.findById(message._id).populate('sender', 'username');
-      io.emit('message', populatedMessage);
+      io.emit('message', {
+        id: message._id,
+        content: populatedMessage.content,
+        sender: {
+          username: populatedMessage.sender.username,
+          id: populatedMessage.sender._id,
+          role: socket.user.role
+        }
+      });
     } catch (error) {
       console.error('Error saving message:', error);
     }
   });
 
+  socket.on('deleteMessage', async (messageId) => {
+    if (socket.user.role === 'admin') {
+      try {
+        await Message.findByIdAndDelete(messageId);
+        io.emit('messageDeleted', messageId);
+      } catch (error) {
+        console.error('Error deleting message:', error);
+      }
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.user.username);
+    connectedUsers.delete(socket.id);
+    broadcastUserList();
   });
 });
 
@@ -170,4 +277,3 @@ const PORT = 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
- 

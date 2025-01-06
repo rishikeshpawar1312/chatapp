@@ -3,21 +3,29 @@ import axios, { AxiosError } from 'axios';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import {jwtDecode} from 'jwt-decode'; // Fixed import
+import { jwtDecode } from 'jwt-decode';
 
 // Types
+interface User {
+  id: string;
+  username: string;
+  role: string;
+}
+
 interface AuthFormProps {
-  setUser: (user: DecodedToken) => void;
+  setUser: React.Dispatch<React.SetStateAction<User | null>>;
 }
 
 interface LoginResponse {
   token: string;
   username: string;
+  role: string;
 }
 
 interface DecodedToken {
   id: string;
   username: string;
+  role: string;
   exp: number;
 }
 
@@ -57,7 +65,15 @@ const AuthForm: React.FC<AuthFormProps> = ({ setUser }) => {
         if (decodedToken.exp < Date.now() / 1000) {
           throw new Error('Token has expired');
         }
-        setUser(decodedToken);
+        
+        // Create user object with role
+        const user: User = {
+          id: decodedToken.id,
+          username: decodedToken.username,
+          role: decodedToken.role // Now included in decoded token
+        };
+        
+        setUser(user);
       } catch (decodeError) {
         setError('Invalid token received');
         localStorage.removeItem('token');
