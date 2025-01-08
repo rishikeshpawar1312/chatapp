@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Trash2, Shield } from "lucide-react";
 import AuthForm from './Auth/Authform';
+import { useToast } from './hooks/use-toast';
 
 interface Message {
   id: string;
@@ -23,6 +24,8 @@ interface User {
   role: string;
 }
 
+const API_BASE_URL = 'http://localhost:3000';
+
 const App: React.FC = () => {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -30,11 +33,13 @@ const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<User[]>([]);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [isDeleting, setIsDeleting] = useState<string | null>(null);
+  const { toast } = useToast();
 
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (token) {
-      const newSocket = io('http://localhost:3000', {
+      const newSocket = io(API_BASE_URL, {
         auth: { token }
       });
 
@@ -44,6 +49,11 @@ const App: React.FC = () => {
         if (err.message === 'Authentication error') {
           localStorage.removeItem('token');
           setUser(null);
+          toast({
+            title: "Authentication Error",
+            description: "Please log in again.",
+            variant: "destructive"
+          });
         }
       });
 
@@ -53,6 +63,11 @@ const App: React.FC = () => {
 
       newSocket.on('messageDeleted', (messageId: string) => {
         setMessages(prev => prev.filter(msg => msg.id !== messageId));
+        setIsDeleting(null);
+        toast({
+          title: "Success",
+          description: "Message deleted successfully",
+        });
       });
 
       return () => {
@@ -75,18 +90,26 @@ const App: React.FC = () => {
     }
   }, [socket]);
 
-  const handleDeleteMessage = async (messageId: string) => {
-    try {
-      const response = await fetch(`http://localhost:3000/api/admin/message/${messageId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        }
+  const handleDeleteMessage = (messageId: string) => {
+    if (!socket || isDeleting) return;
+    
+    setIsDeleting(messageId);
+    
+    // Emit deleteMessage event through socket
+    socket.emit('deleteMessage', messageId);
+
+    // Set up a timeout to handle cases where server doesn't respond
+    const timeoutId = setTimeout(() => {
+      setIsDeleting(null);
+      toast({
+        title: "Error",
+        description: "Delete operation timed out. Please try again.",
+        variant: "destructive"
       });
-      if (!response.ok) throw new Error('Failed to delete message');
-    } catch (error) {
-      console.error('Error deleting message:', error);
-    }
+    }, 5000);
+
+    // Clear the timeout if component unmounts
+    return () => clearTimeout(timeoutId);
   };
 
   const handleSubmit = (e: FormEvent<HTMLFormElement>): void => {
@@ -109,6 +132,10 @@ const App: React.FC = () => {
     if (socket) {
       socket.close();
     }
+    toast({
+      title: "Logged Out",
+      description: "You have been successfully logged out.",
+    });
   };
 
   if (!user) {
@@ -197,8 +224,9 @@ const App: React.FC = () => {
                         <button
                           onClick={() => handleDeleteMessage(message.id)}
                           className="text-red-500 hover:text-red-700"
+                          disabled={isDeleting === message.id}
                         >
-                          <Trash2 className="w-4 h-4" />
+                          <Trash2 className={`w-4 h-4 ${isDeleting === message.id ? 'opacity-50' : ''}`} />
                         </button>
                       )}
                     </div>
