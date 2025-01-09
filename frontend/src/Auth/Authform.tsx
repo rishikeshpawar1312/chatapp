@@ -50,7 +50,8 @@ const AuthForm: React.FC<AuthFormProps> = ({ setUser }) => {
     setIsLoading(true);
 
     try {
-      const endpoint = isLogin ? '/api/login' : '/api/register';
+      // Updated endpoints to match new backend structure
+      const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
       const { data } = await axios.post<LoginResponse>(
         `http://localhost:3000${endpoint}`,
         formData
@@ -61,7 +62,8 @@ const AuthForm: React.FC<AuthFormProps> = ({ setUser }) => {
       
       try {
         const decodedToken = jwtDecode<DecodedToken>(token);
-        // Check if token is expired
+        
+        // Add token expiration check
         if (decodedToken.exp < Date.now() / 1000) {
           throw new Error('Token has expired');
         }
@@ -70,17 +72,30 @@ const AuthForm: React.FC<AuthFormProps> = ({ setUser }) => {
         const user: User = {
           id: decodedToken.id,
           username: decodedToken.username,
-          role: decodedToken.role // Now included in decoded token
+          role: decodedToken.role
         };
+        
+        // Set up axios default authorization header for future requests
+        axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
         
         setUser(user);
       } catch (decodeError) {
         setError('Invalid token received');
         localStorage.removeItem('token');
+        delete axios.defaults.headers.common['Authorization'];
       }
     } catch (err) {
       const error = err as AxiosError<ApiError>;
-      setError(error.response?.data?.error || 'An error occurred');
+      if (error.response?.status === 400) {
+        // Handle specific error cases
+        setError(error.response.data.error || 'Invalid credentials');
+      } else if (error.response?.status === 403) {
+        setError('Account has been deactivated');
+      } else {
+        setError('An error occurred. Please try again.');
+      }
+      localStorage.removeItem('token');
+      delete axios.defaults.headers.common['Authorization'];
     } finally {
       setIsLoading(false);
     }
